@@ -2,6 +2,7 @@
 
 import sys
 from lxml import etree
+from math import *
 
 # Inkscape extension code (GPL2)
 import simpletransform
@@ -39,6 +40,8 @@ class SvgParser:
                     "mm": 3.543307,
                     "cm": 35.43307,
                     "in": 90.0}
+   
+   pathEnds = []
 
    def __init__(self, filename, smoothness=0.1):
       self.smoothness = smoothness
@@ -53,9 +56,13 @@ class SvgParser:
       return etree.QName(self.nsmap["svg"], foo)
 
 
+   def qName(self, nsmap, foo):
+      return etree.QName(self.nsmap[nsmap], foo)
+
+
    def findMinCenterMaxOfObjects(self, objects):
       """ Analyses all the raw objects to determine the min, center, and max of all coordinates. """
-      xmin = xmax = ymin = ymax = None
+      xmin = xmax = xcenter = ymin = ymax = ycenter = None
       for fill, points in objects:
          for x, y in points:
             #print x, y
@@ -129,10 +136,41 @@ class SvgParser:
       realPoints = []
       for sp in p:
          cspsubdiv.subdiv(sp, self.smoothness)
-         for csp in sp:
-            realPoints.append( (csp[1][0], csp[1][1]) )
-
+      
+      for i in range(1, len(p)):
+         pStart = [p[i][0][1][0], p[i][0][1][1]]
+         pClose = []
+         pDist = -1
+         for k in range(len(p)):
+            if (k == i):
+               continue
+            for j in range(len(p[k])):
+               csp = p[k][j];
+               tDist = self.getDist(pStart, [csp[1][0], csp[1][1]])
+               if (pDist < 0) or (tDist < pDist):
+                  pDist = tDist
+                  pClose = [k, j]
+         if pClose:
+            #print "close " + repr(i) + " " + repr(pClose) + " " + repr(p[pClose[0]][pClose[1]])
+            p[pClose[0]][pClose[1]].append(i)
+      
+      self.genPoints(p, p[0], realPoints)
       self.rawObjects.append( (filledPath, realPoints) )
+
+
+
+   def getDist(self, a, b):
+      """ Gets the distance between two points """
+      return fabs(sqrt(pow((a[0] - b[0]), 2) + pow((a[1] - b[1]), 2)))
+
+
+
+   def genPoints(self, p, sp, points):
+      for csp in sp:
+         points.append( (csp[1][0], csp[1][1]) )
+         if (len(csp) > 3):
+            self.genPoints(p, p[csp[3]], points)
+            points.append( (csp[1][0], csp[1][1]) )
 
 
 
@@ -152,6 +190,18 @@ class SvgParser:
          pass
 
       return None, None
+
+
+
+   def hasCSSAttr(self, attrStr, key, val):
+      """ Determines if attrStr(css formatted) has an attribute of key
+      with a value equal to val. """
+      attrs = attrStr.split(';')
+      for attr in attrs:
+        detail = attr.split(':')
+        if detail[0] == key and detail[1] == val:
+          return 1
+      return 0
 
 
 
@@ -191,22 +241,45 @@ class SvgParser:
 
 
       for node in nodeList:
-
+         print "node " + node.get("id")
+         
          # Ignore invisible nodes
          v = node.get('visibility', parent_visibility)
          if v == 'inherit':
             v = parent_visibility
          if v == 'hidden' or v == 'collapse':
-            pass
+            continue
+         
+         # Check css attributes for invisible
+         sty = node.get('style')
+         if sty and self.hasCSSAttr(sty, 'display', 'none') == 1:
+            print "Invisible " + node.get("id")
+            continue
 
          # first apply the current matrix transform to this node's transform
          matNew = simpletransform.composeTransform( matCurrent, simpletransform.parseTransform(node.get("transform")) )
 
          if node.tag in [self.svgQName("g"), "g"]:
             print "group tag - Might not be handled right!"
-            self.recursivelyTraverseSvg( list(node), matNew, v )
+            nList = list(node)
+            if len(nList):
+              self.recursivelyTraverseSvg( nList, matNew, v )
+         
+         # Use tag, used for cloned items or references
+         elif node.tag in [self.svgQName("use"), "use"]:
+            anchorId = node.get(self.qName("xlink", "href"))
+            anchorQry = './/*[@id="' + anchorId[1:] + '"]'
+            print "Use tag: '%s'" % self.qName("xlink", "href")
+            nList = self.svgRoot.findall(anchorQry)
+            
+            if len(nList):
+              self.recursivelyTraverseSvg( nList, matNew, v )
+            else:
+              print "Use node not found!"
+              continue
+            
 
-         elif node.tag in [self.svgQName("path")]:
+         elif node.tag in [self.svgQName("path"), "path"]:
             self.plotPath( node, matNew )
 
          else:
